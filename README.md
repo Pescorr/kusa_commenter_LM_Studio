@@ -1,4 +1,4 @@
-# Screen Commentator (Windows)
+# kusa_commenter_LM_Studio
 
 AI が画面を見て、スクロールコメントを自動生成するオーバーレイアプリケーションです。
 ローカル LLM（LM Studio）を使って画面のスクリーンショットを分析し、
