@@ -1,0 +1,19 @@
+# Windows版 Screen Commentator - 依存パッケージ
+
+# スクリーンショットキャプチャ
+mss>=9.0.1
+
+# 画像処理
+Pillow>=10.0.0
+
+# HTTP通信（LM Studio API）
+requests>=2.31.0
+
+# Windows GUI（クリックスルー、ウィンドウ操作）
+pywin32>=306
+
+# キーボード・マウス監視（アイドル検出用）
+pynput>=1.7.6
+
+# システムトレイアイコン
+pystray>=0.19.4
