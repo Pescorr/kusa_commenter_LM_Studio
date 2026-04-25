@@ -6,7 +6,7 @@ dist/
 *.lnk
 .claude/
 screenshots_temp/
-*.spec
+# *.spec はビルド設定なので追跡する（PyInstaller の自動生成 .spec ではなく手動メンテ版）
 *.zip
 nul
 _zip_verify/

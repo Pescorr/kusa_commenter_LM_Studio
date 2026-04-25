@@ -12,6 +12,7 @@ import sys
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
 
 # srcディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
@@ -30,6 +31,7 @@ from persona_manager import PersonaManager
 from comment_generator import CommentGenerator
 from screenshot_capture import ScreenshotCaptureThread, LLMWorkerThread
 from llm_client import LMStudioClient
+from llama_server_manager import LlamaServerManager
 
 # ロガー設定
 logging.basicConfig(
@@ -63,6 +65,78 @@ def load_config(config_path: Path) -> SafeConfigParser:
     # SafeConfigParserでラップしてインラインコメントを自動除去
     safe_config = SafeConfigParser(config)
     return safe_config
+
+
+def maybe_start_llama_server(config: SafeConfigParser) -> Optional[LlamaServerManager]:
+    """
+    config.ini の [llama_server] セクションで auto_start = true なら llama-server.exe を起動。
+    起動成功時は LlamaServerManager を返す（atexit で確実に停止）。
+    無効化されている、または起動失敗の場合は None を返す。
+
+    Returns:
+        LlamaServerManager または None
+    """
+    if not config._config.has_section('llama_server'):
+        return None
+    if not config.getboolean('llama_server', 'auto_start', fallback=False):
+        logger.info("llama_server.auto_start = false, skip starting llama-server")
+        return None
+
+    base_dir = get_base_dir()
+
+    def _resolve(p: str) -> Path:
+        path = Path(p)
+        return path if path.is_absolute() else (base_dir / path)
+
+    exe_path = _resolve(config.get('llama_server', 'executable_path',
+                                    fallback='llama_server/llama-server.exe'))
+    model_path = _resolve(config.get('llama_server', 'model_path',
+                                      fallback='models/Qwen3.5-9B-Q4_K_M.gguf'))
+    mmproj_str = config.get('llama_server', 'mmproj_path', fallback='models/mmproj-BF16.gguf')
+    mmproj_path = _resolve(mmproj_str) if mmproj_str else None
+
+    manager = LlamaServerManager(
+        executable_path=exe_path,
+        model_path=model_path,
+        mmproj_path=mmproj_path,
+        port=config.getint('llama_server', 'port', fallback=8080),
+        n_gpu_layers=config.getint('llama_server', 'n_gpu_layers', fallback=-1),
+        ctx_size=config.getint('llama_server', 'ctx_size', fallback=8192),
+        extra_args=config.get('llama_server', 'extra_args', fallback=''),
+    )
+
+    try:
+        manager.start()
+    except FileNotFoundError as e:
+        logger.error("llama-server を起動できませんでした: %s", e)
+        try:
+            import tkinter.messagebox as mb
+            mb.showerror(
+                "セットアップ未完了",
+                str(e) + "\n\n初回起動時は setup_model.bat を実行してモデルを"
+                         "ダウンロードしてください。"
+            )
+        except Exception:
+            pass
+        sys.exit(1)
+
+    timeout_sec = config.getfloat('llama_server', 'startup_timeout_sec', fallback=180.0)
+    logger.info("llama-server の起動を待機中 (最大 %.0f 秒)...", timeout_sec)
+    if not manager.wait_until_ready(timeout=timeout_sec):
+        logger.error("llama-server が起動しませんでした。")
+        manager.stop()
+        try:
+            import tkinter.messagebox as mb
+            mb.showerror(
+                "llama-server 起動失敗",
+                f"llama-server が {timeout_sec:.0f} 秒以内に起動しませんでした。\n"
+                "config.ini の [llama_server] 設定を確認してください。"
+            )
+        except Exception:
+            pass
+        sys.exit(1)
+
+    return manager
 
 
 def initialize_llm_client(config: SafeConfigParser) -> LMStudioClient:
@@ -208,6 +282,14 @@ def main():
         temp_dir = get_base_dir() / temp_dir
     temp_dir.mkdir(exist_ok=True)
     logger.info(f"スクリーンショット一時ディレクトリ: {temp_dir}")
+
+    # llama-server を auto_start = true なら起動して ready まで待機
+    llama_server = maybe_start_llama_server(config)
+    if llama_server:
+        # config の api_base_url が未設定／空ならサーバの URL を使う
+        configured_url = config.get('llm', 'api_base_url', fallback='').strip()
+        if not configured_url:
+            config._config.set('llm', 'api_base_url', llama_server.base_url)
 
     # LM Studio クライアント初期化
     logger.info("LM Studio クライアントを初期化中...")
