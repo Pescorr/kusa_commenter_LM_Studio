@@ -103,6 +103,7 @@ def maybe_start_llama_server(config: SafeConfigParser) -> Optional[LlamaServerMa
         n_gpu_layers=config.getint('llama_server', 'n_gpu_layers', fallback=-1),
         ctx_size=config.getint('llama_server', 'ctx_size', fallback=8192),
         extra_args=config.get('llama_server', 'extra_args', fallback=''),
+        disable_thinking=config.getboolean('llama_server', 'disable_thinking', fallback=True),
     )
 
     try:

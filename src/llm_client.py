@@ -78,17 +78,26 @@ class LMStudioClient:
 
     def _remove_thinking_tags(self, text: str) -> str:
         """
-        推論機能付きモデルからのレスポンスに含まれる<thinking>...</thinking>タグを除去
-        
+        推論機能付きモデル（Qwen3, DeepSeek-R1 等）のレスポンスに含まれる
+        思考タグ <think>...</think> および <thinking>...</thinking> を除去。
+
+        - 閉じタグまで揃っている場合は、その範囲を全部除去
+        - 閉じタグが欠落している（出力途中で切れた）場合は、開きタグ以降を全部除去
+
         Args:
             text: 処理対象のテキスト
-            
+
         Returns:
             タグ除去後のテキスト
         """
         import re
-        # <thinking> と </thinking> の間の内容を除去（大文字小文字区別なし）
-        return re.sub(r'<thinking>.*?</thinking>\s*', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # 閉じタグ揃いのペア（<think> / <thinking> どちらも、大文字小文字無視）
+        text = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>\s*', '',
+                      text, flags=re.DOTALL | re.IGNORECASE)
+        # 閉じが欠けた開きタグ以降を切り捨て（truncation 対策）
+        text = re.sub(r'<think(?:ing)?>.*\Z', '',
+                      text, flags=re.DOTALL | re.IGNORECASE)
+        return text
 
     def encode_image_base64(self, image_path: str) -> str:
         """

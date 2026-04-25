@@ -32,6 +32,7 @@ class LlamaServerManager:
         n_gpu_layers: int = -1,
         ctx_size: int = 8192,
         extra_args: str = "",
+        disable_thinking: bool = False,
     ) -> None:
         self.executable_path = Path(executable_path)
         self.model_path = Path(model_path)
@@ -40,6 +41,7 @@ class LlamaServerManager:
         self.n_gpu_layers = n_gpu_layers
         self.ctx_size = ctx_size
         self.extra_args = extra_args.strip()
+        self.disable_thinking = disable_thinking
         self.process: Optional[subprocess.Popen] = None
 
     @property
@@ -57,6 +59,11 @@ class LlamaServerManager:
         ]
         if self.mmproj_path:
             args.extend(["--mmproj", str(self.mmproj_path)])
+        if self.disable_thinking:
+            # Qwen3 / DeepSeek-R1 等の reasoning を完全停止
+            # --reasoning off: chat template の thinking ブロックを無効化
+            # --reasoning-budget 0: 万一思考トークンが出ても即座に打ち切り
+            args.extend(["--reasoning", "off", "--reasoning-budget", "0"])
         if self.extra_args:
             args.extend(self.extra_args.split())
         return args
