@@ -9,6 +9,7 @@ from enum import Enum
 from typing import List
 import json
 import random
+import re
 import logging
 
 from config_utils import SafeConfigParser
@@ -144,6 +145,7 @@ class CommentGenerator:
             # 成功 → 失敗カウンターリセット
             self.smart_mode_failures = 0
             logger.info(f"Smart Mode成功: {len(comments)}個のコメント生成")
+
             return comments
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -276,7 +278,7 @@ class CommentGenerator:
 
     def _extract_json(self, text: str) -> str:
         """
-        LLMの応答からJSON部分を抽出
+        LLMの応答からJSON部分を抽出し、壊れたJSONの修復を試みる
 
         Args:
             text: LLMの応答テキスト
@@ -289,15 +291,115 @@ class CommentGenerator:
             start = text.find('```json') + 7
             end = text.find('```', start)
             if end != -1:
-                return text[start:end].strip()
+                candidate = text[start:end].strip()
+                return self._repair_json(candidate)
 
         # { ... } の部分を抽出
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1:
-            return text[start:end+1]
+            candidate = text[start:end+1]
+            return self._repair_json(candidate)
 
         # そのまま返す
+        return text
+
+    def _repair_json(self, text: str) -> str:
+        """
+        LLMが出力した壊れたJSONを段階的に修復する
+
+        修復パターン:
+        1. raw_decode で末尾のゴミを無視（有効なJSONの後に余計な文字）
+        2. 二重波括弧 ({{ → {, }} → })
+        3. 閉じ括弧の補完（途中切れ対応）
+        4. 末尾の余分な括弧を削って再構築
+        """
+        # まず正常なJSONかチェック
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            pass
+
+        # 修復1: raw_decode — 有効なJSONの後の余計な文字を無視
+        try:
+            decoder = json.JSONDecoder()
+            obj, _ = decoder.raw_decode(text.lstrip())
+            result = json.dumps(obj, ensure_ascii=False)
+            logger.info("JSON修復適用: 末尾のゴミを除去")
+            return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 修復2: 二重波括弧 ({{ → {, }} → })
+        fixed = text.replace('{{', '{').replace('}}', '}')
+        try:
+            json.loads(fixed)
+            logger.info("JSON修復適用: 二重波括弧を単一に変換")
+            return fixed
+        except json.JSONDecodeError:
+            pass
+        # 二重波括弧修復 + raw_decode
+        try:
+            decoder = json.JSONDecoder()
+            obj, _ = decoder.raw_decode(fixed.lstrip())
+            result = json.dumps(obj, ensure_ascii=False)
+            logger.info("JSON修復適用: 二重波括弧変換 + 末尾除去")
+            return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 修復3: 閉じ括弧の補完（途中切れ対応）
+        completed = self._complete_brackets(text)
+        if completed != text:
+            try:
+                json.loads(completed)
+                logger.info("JSON修復適用: 括弧補完")
+                return completed
+            except json.JSONDecodeError:
+                pass
+
+        # 修復4: 末尾の余分な閉じ括弧を1つずつ削って試行
+        trimmed = text
+        while trimmed and trimmed[-1] in '}]':
+            trimmed = trimmed[:-1]
+            # 正しい閉じ括弧を補完して試行
+            completed = self._complete_brackets(trimmed)
+            try:
+                json.loads(completed)
+                logger.info("JSON修復適用: 末尾再構築")
+                return completed
+            except json.JSONDecodeError:
+                continue
+
+        # 修復できなかった場合は元のテキストを返す
+        return text
+
+    @staticmethod
+    def _complete_brackets(text: str) -> str:
+        """不足している閉じ括弧を補完（ネスト構造を考慮）"""
+        stack = []
+        in_string = False
+        escape_next = False
+        for ch in text:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch in '{[':
+                stack.append('}' if ch == '{' else ']')
+            elif ch in '}]':
+                if stack and stack[-1] == ch:
+                    stack.pop()
+        if stack:
+            return text + ''.join(reversed(stack))
         return text
 
     def _calculate_speed(self) -> float:

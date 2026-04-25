@@ -7,7 +7,6 @@ import os
 import base64
 import time
 import requests
-from datetime import datetime
 from PIL import Image
 from io import BytesIO
 
@@ -18,8 +17,8 @@ class LMStudioClient:
     def __init__(
         self,
         base_url="http://localhost:1234/v1",
-        vision_model_name="local-model",
-        summary_model_name="local-model",
+        vision_model_name="",
+        summary_model_name="",
         timeout=30,
         max_retries=3,
         temperature=0.7,
@@ -38,10 +37,17 @@ class LMStudioClient:
         smart_mode_max_tokens=300,
         basic_mode_max_tokens=100,
         api_error_cooldown_sec=300,
+        api_token="",
+        api_mode="openai",
+        mcp_integrations="",
     ):
         self.base_url = base_url.rstrip("/")
+        self.api_token = api_token
+        self.api_mode = api_mode  # "openai" or "lmstudio"
+        self.mcp_integrations = [s.strip() for s in mcp_integrations.split(",") if s.strip()] if mcp_integrations else []
         self.vision_model_name = vision_model_name  # Model for screenshot analysis (must support vision)
         self.summary_model_name = summary_model_name  # Model for text-only summary generation
+        self._resolved_model_name = None  # lmstudioモード用: local-model解決後のキャッシュ
         self.timeout = timeout
         self.max_retries = max_retries
         self.temperature = temperature
@@ -221,6 +227,140 @@ class LMStudioClient:
             # Return fallback summary
             return self.summary_fallback_message.format(username=username)
 
+    def _resolve_model_name(self, model_name: str) -> str:
+        """
+        lmstudioモード用: local-model等の汎用名を実際のモデルIDに解決
+
+        /api/v1/chatはlocal-modelを受け付けないため、
+        /api/v1/modelsから現在ロード済みのモデルIDを取得して使用する
+        """
+        if model_name and model_name != "local-model":
+            return model_name
+
+        # キャッシュがあればそれを使う
+        if self._resolved_model_name:
+            return self._resolved_model_name
+
+        try:
+            root_url = self.base_url
+            if root_url.endswith("/v1"):
+                root_url = root_url[:-3]
+
+            headers = {}
+            if self.api_token:
+                headers["Authorization"] = f"Bearer {self.api_token}"
+
+            # /api/v1/models から loaded_instances があるモデルを探す
+            resp = requests.get(f"{root_url}/api/v1/models", headers=headers, timeout=10)
+            resp.raise_for_status()
+            models = resp.json().get("models", [])
+
+            for model in models:
+                loaded = model.get("loaded_instances", 0)
+                if isinstance(loaded, list):
+                    loaded = len(loaded)
+                if loaded > 0:
+                    self._resolved_model_name = model["key"]
+                    print(f"[LLM Client] Model resolved: local-model → {self._resolved_model_name} (loaded)")
+                    return self._resolved_model_name
+
+            # ロード済みモデルがない場合、/v1/modelsの最初のモデルにフォールバック
+            resp2 = requests.get(f"{self.base_url}/models", headers=headers, timeout=10)
+            resp2.raise_for_status()
+            openai_models = resp2.json().get("data", [])
+            if openai_models:
+                self._resolved_model_name = openai_models[0]["id"]
+                print(f"[LLM Client] Model resolved: local-model → {self._resolved_model_name} (fallback)")
+                return self._resolved_model_name
+
+        except Exception as e:
+            print(f"[LLM Client] Failed to resolve model name: {e}")
+
+        # フォールバック: そのまま返す
+        return model_name
+
+    def _build_request(self, messages: list, max_tokens: int, model_name: str = None):
+        """
+        APIモードに応じてURL・ペイロード・ヘッダーを構築
+
+        Returns:
+            (url, payload, headers) のタプル
+        """
+        actual_model = model_name or self.vision_model_name
+        headers = {"Content-Type": "application/json"}
+
+        if self.api_token:
+            headers["Authorization"] = f"Bearer {self.api_token}"
+
+        if self.api_mode == "lmstudio":
+            # local-modelを実際のモデル名に解決
+            actual_model = self._resolve_model_name(actual_model)
+            # LM Studio独自API: /api/v1/chat
+            root_url = self.base_url
+            if root_url.endswith("/v1"):
+                root_url = root_url[:-3]
+            url = f"{root_url}/api/v1/chat"
+
+            # OpenAI messages形式 → LM Studio input形式に変換
+            input_blocks = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    # systemプロンプトはテキストブロックとして先頭に追加
+                    input_blocks.append({"type": "text", "content": f"[System] {msg['content']}"})
+                elif msg["role"] == "user":
+                    content = msg["content"]
+                    if isinstance(content, list):
+                        # マルチモーダル: text/image_url → text/image に変換
+                        for part in content:
+                            if part.get("type") == "text":
+                                input_blocks.append({"type": "text", "content": part["text"]})
+                            elif part.get("type") == "image_url":
+                                data_url = part["image_url"]["url"]
+                                input_blocks.append({"type": "image", "data_url": data_url})
+                    else:
+                        input_blocks.append({"type": "text", "content": content})
+
+            payload = {
+                "model": actual_model,
+                "input": input_blocks,
+            }
+
+            if self.mcp_integrations:
+                payload["integrations"] = self.mcp_integrations
+
+        else:
+            # OpenAI互換API: /v1/chat/completions
+            url = f"{self.base_url}/chat/completions"
+            payload = {
+                "model": actual_model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": self.temperature,
+            }
+
+        return url, payload, headers
+
+    def _parse_response(self, data: dict) -> str:
+        """
+        APIモードに応じてレスポンスからテキストを抽出
+        """
+        if self.api_mode == "lmstudio":
+            # LM Studio独自API形式: {"output": [{"type": "message", "content": "..."}, ...]}
+            if "output" in data:
+                for item in data["output"]:
+                    if item.get("type") == "message" and "content" in item:
+                        return item["content"]
+                raise ValueError("No message content in LM Studio API response")
+            # フォールバック: OpenAI形式もチェック
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"]["content"]
+            raise ValueError("Invalid response format from LM Studio API")
+        else:
+            # OpenAI互換形式
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"]["content"]
+            raise ValueError("Invalid response format from LM Studio API")
+
     def _call_api(self, messages: list, max_tokens: int, model_name: str = None) -> str:
         """
         Internal method to call LM Studio API with retry logic
@@ -231,22 +371,12 @@ class LMStudioClient:
             model_name: Model to use (defaults to vision_model_name if not specified)
 
         Returns:
-            Generated text from LLM
+            Response text
 
         Raises:
             Exception if all retries fail
         """
-        url = f"{self.base_url}/chat/completions"
-
-        # Use specified model or default to vision model
-        actual_model = model_name or self.vision_model_name
-
-        payload = {
-            "model": actual_model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": self.temperature,
-        }
+        url, payload, headers = self._build_request(messages, max_tokens, model_name)
 
         last_exception = None
 
@@ -255,6 +385,7 @@ class LMStudioClient:
                 response = requests.post(
                     url,
                     json=payload,
+                    headers=headers,
                     timeout=self.timeout,
                 )
 
@@ -263,12 +394,7 @@ class LMStudioClient:
 
                 # Parse response
                 data = response.json()
-
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"]["content"]
-                    return content
-                else:
-                    raise ValueError("Invalid response format from LM Studio API")
+                return self._parse_response(data)
 
             except requests.exceptions.ConnectionError as e:
                 last_exception = e
@@ -333,9 +459,6 @@ class LMStudioClient:
             # Encode image
             img_base64 = self.encode_image_base64(screenshot_path)
 
-            user_prompt = "スクリーンショットを見て、指定されたペルソナでコメントを生成してください。"
-
-            # Prepare messages
             messages = [
                 {
                     "role": "system",
@@ -346,7 +469,7 @@ class LMStudioClient:
                     "content": [
                         {
                             "type": "text",
-                            "text": user_prompt
+                            "text": "スクリーンショットを見て、指定されたペルソナでコメントを生成してください。"
                         },
                         {
                             "type": "image_url",
@@ -361,7 +484,6 @@ class LMStudioClient:
             # Call API with vision model (複数コメント分のトークン確保)
             response_text = self._call_api(messages, max_tokens=self.smart_mode_max_tokens, model_name=self.vision_model_name)
 
-            # Remove thinking tags and clean up response
             self.consecutive_errors = 0
             self.api_available = True
 
@@ -390,9 +512,6 @@ class LMStudioClient:
             # Encode image
             img_base64 = self.encode_image_base64(screenshot_path)
 
-            user_prompt = f"スクリーンショットを見て、{max_chars}文字以内でコメントしてください。"
-
-            # Prepare messages
             messages = [
                 {
                     "role": "system",
@@ -403,7 +522,7 @@ class LMStudioClient:
                     "content": [
                         {
                             "type": "text",
-                            "text": user_prompt
+                            "text": f"スクリーンショットを見て、{max_chars}文字以内でコメントしてください。"
                         },
                         {
                             "type": "image_url",
@@ -422,9 +541,7 @@ class LMStudioClient:
             self.consecutive_errors = 0
             self.api_available = True
 
-            # Remove thinking tags, clean up, and apply max_chars limit
-            comment = self._remove_thinking_tags(response_text).strip().strip('"').strip("'")
-            return comment[:max_chars]
+            return self._remove_thinking_tags(response_text).strip().strip('"').strip("'")[:max_chars]
 
         except Exception as e:
             self.consecutive_errors += 1

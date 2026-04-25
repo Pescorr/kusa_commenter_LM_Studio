@@ -91,6 +91,9 @@ def initialize_llm_client(config: SafeConfigParser) -> LMStudioClient:
         smart_mode_max_tokens=config.getint('llm', 'smart_mode_max_tokens', fallback=300),
         basic_mode_max_tokens=config.getint('llm', 'basic_mode_max_tokens', fallback=100),
         api_error_cooldown_sec=config.getint('llm', 'api_error_cooldown_sec', fallback=300),
+        api_token=config.get('llm', 'api_token', fallback=''),
+        api_mode=config.get('llm', 'api_mode', fallback='openai'),
+        mcp_integrations=config.get('llm', 'mcp_integrations', fallback=''),
     )
 
     logger.info("LM Studio クライアント初期化完了")

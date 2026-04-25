@@ -7,3 +7,7 @@ dist/
 .claude/
 screenshots_temp/
 *.spec
+*.zip
+nul
+_zip_verify/
+logs/
