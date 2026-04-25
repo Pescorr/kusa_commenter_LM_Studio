@@ -1,4 +1,4 @@
-# kusa_commenter_LM_Studio
+# kusa_commenter
 
 AI が画面を見て、スクロールコメントを自動生成するオーバーレイアプリケーションです。
 ローカル LLM（llama.cpp 同梱）が画面のスクリーンショットを分析し、
